@@ -52,19 +52,30 @@ func WalkPrefixes(ctx context.Context, client ListObjectsV2API, bucket, rootPref
 }
 
 func listCommonPrefixes(ctx context.Context, client ListObjectsV2API, bucket, rootPrefix string) ([]string, error) {
-	out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket:    aws.String(bucket),
-		Prefix:    aws.String(rootPrefix),
-		Delimiter: aws.String("/"),
-	})
-	if err != nil {
-		return nil, err
+	var prefixes []string
+	var continuationToken *string
+
+	for {
+		out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(bucket),
+			Prefix:            aws.String(rootPrefix),
+			Delimiter:         aws.String("/"),
+			ContinuationToken: continuationToken,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		for _, cp := range out.CommonPrefixes {
+			prefixes = append(prefixes, aws.ToString(cp.Prefix))
+		}
+
+		if out.IsTruncated == nil || !*out.IsTruncated {
+			break
+		}
+		continuationToken = out.NextContinuationToken
 	}
 
-	prefixes := make([]string, 0, len(out.CommonPrefixes))
-	for _, cp := range out.CommonPrefixes {
-		prefixes = append(prefixes, aws.ToString(cp.Prefix))
-	}
 	return prefixes, nil
 }
 

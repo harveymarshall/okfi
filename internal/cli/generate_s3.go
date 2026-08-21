@@ -100,6 +100,13 @@ func parseS3URI(uri string) (bucket, prefix string, err error) {
 	if bucket == "" {
 		return "", "", fmt.Errorf("invalid s3 URI %q: missing bucket", uri)
 	}
+
+	// Normalize with a trailing slash so S3's plain string-prefix match
+	// only matches true descendants (e.g. "some/path/foo"), not unrelated
+	// siblings that merely share the string prefix (e.g. "some/path-other/").
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
 	return bucket, prefix, nil
 }
 

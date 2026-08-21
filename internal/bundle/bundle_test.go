@@ -83,6 +83,7 @@ func TestWriteBundle_FrontmatterAndBody(t *testing.T) {
 		`title: "orders/"`,
 		`resource: "s3://my-bucket/orders/"`,
 		`timestamp: "2026-01-01T12:00:00Z"`,
+		`description: ""`,
 		"- Object count: 3",
 	} {
 		if !strings.Contains(content, want) {

@@ -16,21 +16,44 @@ import (
 // keyed by delimiter so the walker's two call shapes (prefix discovery vs.
 // per-prefix object listing) can be scripted independently in one fake.
 type fakeS3Client struct {
-	// commonPrefixes is returned for the delimiter-scoped discovery call.
+	// commonPrefixes is returned for the delimiter-scoped discovery call,
+	// as a single page. For multi-page discovery, set commonPrefixPages
+	// instead.
 	commonPrefixes []string
+	// commonPrefixPages, if set, overrides commonPrefixes: each entry is
+	// one page of the delimiter-scoped discovery call.
+	commonPrefixPages [][]string
 	// objectsByPrefix is returned for the per-prefix, no-delimiter call.
 	// Each entry is one "page"; a fake reads through them in order per prefix.
 	objectsByPrefix map[string][][]types.Object
 	callsByPrefix   map[string]int
+	discoveryCalls  int
 }
 
 func (f *fakeS3Client) ListObjectsV2(ctx context.Context, in *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
 	if in.Delimiter != nil && *in.Delimiter == "/" {
+		pages := f.commonPrefixPages
+		if pages == nil {
+			pages = [][]string{f.commonPrefixes}
+		}
+
+		pageIdx := f.discoveryCalls
+		f.discoveryCalls++
+		if pageIdx >= len(pages) {
+			return &s3.ListObjectsV2Output{IsTruncated: aws.Bool(false)}, nil
+		}
+
 		var prefixes []types.CommonPrefix
-		for _, p := range f.commonPrefixes {
+		for _, p := range pages[pageIdx] {
 			prefixes = append(prefixes, types.CommonPrefix{Prefix: aws.String(p)})
 		}
-		return &s3.ListObjectsV2Output{CommonPrefixes: prefixes, IsTruncated: aws.Bool(false)}, nil
+
+		truncated := pageIdx < len(pages)-1
+		out := &s3.ListObjectsV2Output{CommonPrefixes: prefixes, IsTruncated: aws.Bool(truncated)}
+		if truncated {
+			out.NextContinuationToken = aws.String("discovery-token-" + string(rune('0'+pageIdx+1)))
+		}
+		return out, nil
 	}
 
 	prefix := aws.ToString(in.Prefix)
@@ -160,6 +183,28 @@ func TestWalkPrefixes_Paginates(t *testing.T) {
 	}
 	if got.TotalSize != 3 {
 		t.Errorf("TotalSize = %d, want 3", got.TotalSize)
+	}
+}
+
+func TestWalkPrefixes_PaginatesTopLevelPrefixDiscovery(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	client := &fakeS3Client{
+		commonPrefixPages: [][]string{
+			{"orders/"},
+			{"events/"},
+		},
+		objectsByPrefix: map[string][][]types.Object{
+			"orders/": {{obj("orders/1.csv", 1, t0)}},
+			"events/": {{obj("events/1.json", 2, t0)}},
+		},
+	}
+
+	summaries, err := s3walk.WalkPrefixes(context.Background(), client, "my-bucket", "")
+	if err != nil {
+		t.Fatalf("WalkPrefixes returned error: %v", err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("expected 2 summaries across two discovery pages, got %d", len(summaries))
 	}
 }
 

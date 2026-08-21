@@ -51,6 +51,9 @@ func render(c Concept) string {
 	fmt.Fprintf(&b, "title: %s\n", yamlString(c.Title))
 	fmt.Fprintf(&b, "resource: %s\n", yamlString(c.Resource))
 	fmt.Fprintf(&b, "timestamp: %s\n", yamlString(c.Timestamp.UTC().Format(time.RFC3339)))
+	// description is intentionally always blank — left for a human/LLM to
+	// fill in later, never auto-generated (see grilling decision Q6).
+	b.WriteString("description: \"\"\n")
 	b.WriteString("---\n\n")
 	b.WriteString(c.Body)
 	return b.String()
