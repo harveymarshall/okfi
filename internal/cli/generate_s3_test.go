@@ -1,6 +1,31 @@
 package cli
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/harveymarshall/okfi/internal/s3walk"
+)
+
+func TestToConcept_SlugPreservesNestingForOutputPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		prefix   string
+		wantSlug string
+	}{
+		{name: "top-level prefix", prefix: "orders/", wantSlug: "orders"},
+		{name: "nested prefix", prefix: "a/b/baz/", wantSlug: "a/b/baz"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := toConcept("my-bucket", s3walk.PrefixSummary{Prefix: tt.prefix}, time.Now())
+			if c.Slug != tt.wantSlug {
+				t.Errorf("Slug = %q, want %q", c.Slug, tt.wantSlug)
+			}
+		})
+	}
+}
 
 func TestParseS3URI(t *testing.T) {
 	tests := []struct {

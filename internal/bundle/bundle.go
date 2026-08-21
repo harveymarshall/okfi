@@ -37,6 +37,9 @@ func WriteBundle(concepts []Concept, outDir string) error {
 
 	for _, c := range concepts {
 		path := filepath.Join(outDir, c.Slug+".md")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("bundle: create dir for %s: %w", path, err)
+		}
 		if err := os.WriteFile(path, []byte(render(c)), 0o644); err != nil {
 			return fmt.Errorf("bundle: write %s: %w", path, err)
 		}

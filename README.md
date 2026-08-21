@@ -26,8 +26,10 @@ go install github.com/harveymarshall/okfi@latest
 okfi generate s3 s3://my-bucket/some/path --out ./bundle
 ```
 
-Generates one markdown file per top-level prefix under
-`s3://my-bucket/some/path` into `./bundle`. Each file has OKF frontmatter
+Generates one markdown file per prefix nested under
+`s3://my-bucket/some/path`, at every level, into `./bundle` — output paths
+mirror the source prefix hierarchy (e.g. prefix `a/b/baz/` writes to
+`bundle/a/b/baz.md`). Each file has OKF frontmatter
 (`type: s3.prefix`, `title`, `resource`, `timestamp`) and a body listing
 object count, total size, last-modified range, and a sample of object keys.
 
