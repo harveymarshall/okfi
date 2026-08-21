@@ -1,6 +1,7 @@
-// Package s3walk discovers top-level prefixes in an S3 bucket and
-// summarizes each one (object count, total size, mtime range, sample keys)
-// for shallow OKF bundle generation. It does not inspect object contents.
+// Package s3walk recursively discovers prefixes in an S3 bucket, at every
+// nesting level, and summarizes each one (object count, total size, mtime
+// range, sample keys) for shallow OKF bundle generation. It does not
+// inspect object contents.
 package s3walk
 
 import (
@@ -31,22 +32,29 @@ type PrefixSummary struct {
 	SampleKeys  []string
 }
 
-// WalkPrefixes lists the top-level prefixes under rootPrefix in bucket and
-// returns a shallow summary of each: object count, total size, mtime range,
-// and a capped sample of object keys. It does not read object contents.
+// WalkPrefixes recursively discovers every prefix nested under rootPrefix in
+// bucket, at every depth, and returns a shallow summary of each: object
+// count, total size, mtime range, and a capped sample of object keys. It
+// does not read object contents. Results are depth-first, no recursion cap.
 func WalkPrefixes(ctx context.Context, client ListObjectsV2API, bucket, rootPrefix string) ([]PrefixSummary, error) {
 	prefixes, err := listCommonPrefixes(ctx, client, bucket, rootPrefix)
 	if err != nil {
 		return nil, err
 	}
 
-	summaries := make([]PrefixSummary, 0, len(prefixes))
+	var summaries []PrefixSummary
 	for _, prefix := range prefixes {
 		summary, err := summarizePrefix(ctx, client, bucket, prefix)
 		if err != nil {
 			return nil, err
 		}
 		summaries = append(summaries, summary)
+
+		children, err := WalkPrefixes(ctx, client, bucket, prefix)
+		if err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, children...)
 	}
 	return summaries, nil
 }

@@ -110,10 +110,12 @@ func parseS3URI(uri string) (bucket, prefix string, err error) {
 	return bucket, prefix, nil
 }
 
-// toConcept maps a walker's shallow prefix summary onto an OKF concept.
+// toConcept maps a walker's shallow prefix summary onto an OKF concept. The
+// slug keeps the prefix's "/" separators (rather than flattening them) so
+// bundle.WriteBundle lays nested prefixes out at matching nested output
+// paths, mirroring the source hierarchy.
 func toConcept(bucket string, s s3walk.PrefixSummary, generatedAt time.Time) bundle.Concept {
 	slug := strings.Trim(s.Prefix, "/")
-	slug = strings.ReplaceAll(slug, "/", "-")
 	if slug == "" {
 		slug = "root"
 	}

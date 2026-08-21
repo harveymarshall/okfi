@@ -97,6 +97,29 @@ func TestWriteBundle_FrontmatterAndBody(t *testing.T) {
 	}
 }
 
+func TestWriteBundle_NestedSlugCreatesSubdirectories(t *testing.T) {
+	outDir := t.TempDir()
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	concepts := []bundle.Concept{{
+		Slug:      "a/b/baz",
+		Type:      "s3.prefix",
+		Title:     "a/b/baz/",
+		Resource:  "s3://my-bucket/a/b/baz/",
+		Timestamp: ts,
+		Body:      "- Object count: 1\n",
+	}}
+
+	if err := bundle.WriteBundle(concepts, outDir); err != nil {
+		t.Fatalf("WriteBundle returned error: %v", err)
+	}
+
+	wantPath := filepath.Join(outDir, "a", "b", "baz.md")
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Errorf("expected nested file %s to exist: %v", wantPath, err)
+	}
+}
+
 func TestWriteBundle_OverwritesInPlace(t *testing.T) {
 	outDir := t.TempDir()
 	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)

@@ -15,30 +15,51 @@ import (
 // fakeS3Client implements s3walk.ListObjectsV2API with canned responses,
 // keyed by delimiter so the walker's two call shapes (prefix discovery vs.
 // per-prefix object listing) can be scripted independently in one fake.
+// Discovery responses are keyed by the *parent* prefix requested, so
+// recursive discovery calls against different parents don't collide (and a
+// parent with no scripted entry naturally terminates recursion by
+// returning no children).
 type fakeS3Client struct {
-	// commonPrefixes is returned for the delimiter-scoped discovery call,
-	// as a single page. For multi-page discovery, set commonPrefixPages
-	// instead.
+	// commonPrefixes, if set, is a shorthand for commonPrefixesByParent[""]
+	// — a single page of children for the root ("") parent.
 	commonPrefixes []string
-	// commonPrefixPages, if set, overrides commonPrefixes: each entry is
-	// one page of the delimiter-scoped discovery call.
+	// commonPrefixesByParent maps parent prefix -> single page of child
+	// common prefixes returned for that parent's discovery call.
+	commonPrefixesByParent map[string][]string
+	// commonPrefixPages, if set, is a shorthand for
+	// commonPrefixPagesByParent[""] — multi-page discovery for the root.
 	commonPrefixPages [][]string
+	// commonPrefixPagesByParent maps parent prefix -> pages of child
+	// common prefixes, for scripting pagination at a given level.
+	commonPrefixPagesByParent map[string][][]string
 	// objectsByPrefix is returned for the per-prefix, no-delimiter call.
 	// Each entry is one "page"; a fake reads through them in order per prefix.
-	objectsByPrefix map[string][][]types.Object
-	callsByPrefix   map[string]int
-	discoveryCalls  int
+	objectsByPrefix        map[string][][]types.Object
+	callsByPrefix          map[string]int
+	discoveryCallsByParent map[string]int
 }
 
 func (f *fakeS3Client) ListObjectsV2(ctx context.Context, in *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
 	if in.Delimiter != nil && *in.Delimiter == "/" {
-		pages := f.commonPrefixPages
+		parent := aws.ToString(in.Prefix)
+
+		pages := f.commonPrefixPagesByParent[parent]
+		if pages == nil && parent == "" && f.commonPrefixPages != nil {
+			pages = f.commonPrefixPages
+		}
 		if pages == nil {
-			pages = [][]string{f.commonPrefixes}
+			single, ok := f.commonPrefixesByParent[parent]
+			if !ok && parent == "" {
+				single = f.commonPrefixes
+			}
+			pages = [][]string{single}
 		}
 
-		pageIdx := f.discoveryCalls
-		f.discoveryCalls++
+		if f.discoveryCallsByParent == nil {
+			f.discoveryCallsByParent = map[string]int{}
+		}
+		pageIdx := f.discoveryCallsByParent[parent]
+		f.discoveryCallsByParent[parent]++
 		if pageIdx >= len(pages) {
 			return &s3.ListObjectsV2Output{IsTruncated: aws.Bool(false)}, nil
 		}
@@ -51,7 +72,7 @@ func (f *fakeS3Client) ListObjectsV2(ctx context.Context, in *s3.ListObjectsV2In
 		truncated := pageIdx < len(pages)-1
 		out := &s3.ListObjectsV2Output{CommonPrefixes: prefixes, IsTruncated: aws.Bool(truncated)}
 		if truncated {
-			out.NextContinuationToken = aws.String("discovery-token-" + string(rune('0'+pageIdx+1)))
+			out.NextContinuationToken = aws.String("discovery-token-" + parent + "-" + string(rune('0'+pageIdx+1)))
 		}
 		return out, nil
 	}
@@ -205,6 +226,44 @@ func TestWalkPrefixes_PaginatesTopLevelPrefixDiscovery(t *testing.T) {
 	}
 	if len(summaries) != 2 {
 		t.Fatalf("expected 2 summaries across two discovery pages, got %d", len(summaries))
+	}
+}
+
+func TestWalkPrefixes_RecursesIntoNestedPrefixes(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	client := &fakeS3Client{
+		commonPrefixesByParent: map[string][]string{
+			"":       {"a/"},
+			"a/":     {"a/b/"},
+			"a/b/":   {"a/b/c/"},
+			"a/b/c/": nil, // bottom of the tree — no further children
+		},
+		objectsByPrefix: map[string][][]types.Object{
+			"a/":     {{obj("a/1.txt", 1, t0)}},
+			"a/b/":   {{obj("a/b/1.txt", 2, t0)}},
+			"a/b/c/": {{obj("a/b/c/1.txt", 3, t0)}},
+		},
+	}
+
+	summaries, err := s3walk.WalkPrefixes(context.Background(), client, "my-bucket", "")
+	if err != nil {
+		t.Fatalf("WalkPrefixes returned error: %v", err)
+	}
+
+	if len(summaries) != 3 {
+		t.Fatalf("expected 3 summaries (one per nesting level), got %d", len(summaries))
+	}
+
+	var gotPrefixes []string
+	for _, s := range summaries {
+		gotPrefixes = append(gotPrefixes, s.Prefix)
+	}
+	wantPrefixes := []string{"a/", "a/b/", "a/b/c/"}
+	for i, want := range wantPrefixes {
+		if i >= len(gotPrefixes) || gotPrefixes[i] != want {
+			t.Errorf("summaries[%d].Prefix = %v, want %q (got order %v)", i, gotPrefixes, want, gotPrefixes)
+			break
+		}
 	}
 }
 
