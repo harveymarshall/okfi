@@ -1,0 +1,11 @@
+# Build output
+/okfi
+/bin/
+
+# Default local bundle output — okfi is a tool, not a bundle;
+# generated output should never be committed as a side effect of a run.
+/bundle/
+
+# Go
+*.test
+*.out
