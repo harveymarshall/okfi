@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -44,7 +45,108 @@ func WriteBundle(concepts []Concept, outDir string) error {
 			return fmt.Errorf("bundle: write %s: %w", path, err)
 		}
 	}
+
+	if err := writeIndexes(concepts, outDir); err != nil {
+		return err
+	}
 	return nil
+}
+
+// dirNode is one directory level in the concept tree used to render
+// index.md files: the concepts filed directly under it, and its immediate
+// child subdirectories.
+type dirNode struct {
+	concepts []Concept
+	subdirs  map[string]*dirNode
+}
+
+func newDirNode() *dirNode {
+	return &dirNode{subdirs: map[string]*dirNode{}}
+}
+
+func (n *dirNode) child(name string) *dirNode {
+	c, ok := n.subdirs[name]
+	if !ok {
+		c = newDirNode()
+		n.subdirs[name] = c
+	}
+	return c
+}
+
+// writeIndexes builds the directory tree implied by concepts' slugs and
+// writes an index.md at outDir (the bundle root) and every nested
+// subdirectory, each listing its direct child concepts and subdirectories.
+// It is a full rebuild from the current concepts on every call, so
+// re-running WriteBundle regenerates each index.md from scratch — no stale
+// links survive from a prior run.
+func writeIndexes(concepts []Concept, outDir string) error {
+	root := newDirNode()
+	for _, c := range concepts {
+		parts := strings.Split(c.Slug, "/")
+		node := root
+		for _, part := range parts[:len(parts)-1] {
+			node = node.child(part)
+		}
+		node.concepts = append(node.concepts, c)
+	}
+	return writeIndex(root, outDir)
+}
+
+func writeIndex(node *dirNode, dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("bundle: create dir %s: %w", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.md"), []byte(renderIndex(node)), 0o644); err != nil {
+		return fmt.Errorf("bundle: write index for %s: %w", dir, err)
+	}
+
+	names := make([]string, 0, len(node.subdirs))
+	for name := range node.subdirs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := writeIndex(node.subdirs[name], filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renderIndex(node *dirNode) string {
+	concepts := append([]Concept(nil), node.concepts...)
+	sort.Slice(concepts, func(i, j int) bool { return concepts[i].Slug < concepts[j].Slug })
+
+	subdirs := make([]string, 0, len(node.subdirs))
+	for name := range node.subdirs {
+		subdirs = append(subdirs, name)
+	}
+	sort.Strings(subdirs)
+
+	var b strings.Builder
+	b.WriteString("# Index\n\n")
+
+	if len(concepts) > 0 {
+		b.WriteString("## Concepts\n\n")
+		for _, c := range concepts {
+			base := filepath.Base(c.Slug)
+			title := c.Title
+			if title == "" {
+				title = base
+			}
+			fmt.Fprintf(&b, "- [%s](%s.md)\n", title, base)
+		}
+		b.WriteString("\n")
+	}
+
+	if len(subdirs) > 0 {
+		b.WriteString("## Directories\n\n")
+		for _, name := range subdirs {
+			fmt.Fprintf(&b, "- [%s/](%s/index.md)\n", name, name)
+		}
+	}
+
+	return b.String()
 }
 
 func render(c Concept) string {
