@@ -117,7 +117,11 @@ func parseS3URI(uri string) (bucket, prefix string, err error) {
 func toConcept(bucket string, s s3walk.PrefixSummary, generatedAt time.Time) bundle.Concept {
 	slug := strings.Trim(s.Prefix, "/")
 	if slug == "" {
-		slug = "root"
+		// s.Prefix == "" only for the walked root itself. Using "_root"
+		// rather than the more obvious "root" avoids colliding with a
+		// real top-level prefix literally named "root/", which would
+		// otherwise trim to the same slug.
+		slug = "_root"
 	}
 
 	return bundle.Concept{

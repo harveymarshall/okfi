@@ -37,23 +37,29 @@ type PrefixSummary struct {
 // count, total size, mtime range, and a capped sample of object keys. It
 // does not read object contents. Results are depth-first, no recursion cap.
 //
-// rootPrefix itself is also summarized (its own summary comes first), so
-// objects sitting directly under it are not lost — otherwise a prefix with
-// no further nested sub-prefixes (e.g. a single flat object) would discover
-// zero common prefixes and yield zero summaries despite having content. The
-// root summary is omitted when rootPrefix has no objects at all.
+// rootPrefix itself is also summarized (its own summary comes first) when
+// it has objects sitting directly under it — not nested under any further
+// sub-prefix. Without this, a prefix with no sub-prefixes at all (e.g. a
+// single flat object) would discover zero common prefixes and yield zero
+// summaries despite having content. The root summary counts only its own
+// direct objects, not the full recursive subtree — descendants already get
+// their own summaries, so aggregating them again here would double-count.
 func WalkPrefixes(ctx context.Context, client ListObjectsV2API, bucket, rootPrefix string) ([]PrefixSummary, error) {
-	root, err := summarizePrefix(ctx, client, bucket, rootPrefix)
+	level, err := listPrefixLevel(ctx, client, bucket, rootPrefix)
 	if err != nil {
 		return nil, err
 	}
 
 	var summaries []PrefixSummary
-	if root.ObjectCount > 0 {
-		summaries = append(summaries, root)
+	if len(level.direct) > 0 {
+		summary := PrefixSummary{Prefix: rootPrefix}
+		for _, obj := range level.direct {
+			accumulate(&summary, obj)
+		}
+		summaries = append(summaries, summary)
 	}
 
-	children, err := walkChildren(ctx, client, bucket, rootPrefix)
+	children, err := walkChildren(ctx, client, bucket, level.children)
 	if err != nil {
 		return nil, err
 	}
@@ -61,50 +67,59 @@ func WalkPrefixes(ctx context.Context, client ListObjectsV2API, bucket, rootPref
 	return summaries, nil
 }
 
-// walkChildren recursively discovers and summarizes every prefix nested
-// under parentPrefix, at every depth. Unlike WalkPrefixes, it does not
-// summarize parentPrefix itself — only its descendants.
-func walkChildren(ctx context.Context, client ListObjectsV2API, bucket, parentPrefix string) ([]PrefixSummary, error) {
-	prefixes, err := listCommonPrefixes(ctx, client, bucket, parentPrefix)
-	if err != nil {
-		return nil, err
-	}
-
+// walkChildren summarizes each prefix in children (each one's full
+// recursive subtree, via summarizePrefix) and recurses into its own
+// nested sub-prefixes, at every depth.
+func walkChildren(ctx context.Context, client ListObjectsV2API, bucket string, children []string) ([]PrefixSummary, error) {
 	var summaries []PrefixSummary
-	for _, prefix := range prefixes {
+	for _, prefix := range children {
 		summary, err := summarizePrefix(ctx, client, bucket, prefix)
 		if err != nil {
 			return nil, err
 		}
 		summaries = append(summaries, summary)
 
-		children, err := walkChildren(ctx, client, bucket, prefix)
+		level, err := listPrefixLevel(ctx, client, bucket, prefix)
 		if err != nil {
 			return nil, err
 		}
-		summaries = append(summaries, children...)
+		grandchildren, err := walkChildren(ctx, client, bucket, level.children)
+		if err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, grandchildren...)
 	}
 	return summaries, nil
 }
 
-func listCommonPrefixes(ctx context.Context, client ListObjectsV2API, bucket, rootPrefix string) ([]string, error) {
-	var prefixes []string
+// prefixLevel is the result of one delimiter-based listing at a single
+// prefix level: its immediate child common prefixes, and any objects
+// sitting directly at that level (not nested under a further
+// "/"-delimited child).
+type prefixLevel struct {
+	children []string
+	direct   []types.Object
+}
+
+func listPrefixLevel(ctx context.Context, client ListObjectsV2API, bucket, prefix string) (prefixLevel, error) {
+	var level prefixLevel
 	var continuationToken *string
 
 	for {
 		out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(bucket),
-			Prefix:            aws.String(rootPrefix),
+			Prefix:            aws.String(prefix),
 			Delimiter:         aws.String("/"),
 			ContinuationToken: continuationToken,
 		})
 		if err != nil {
-			return nil, err
+			return prefixLevel{}, err
 		}
 
 		for _, cp := range out.CommonPrefixes {
-			prefixes = append(prefixes, aws.ToString(cp.Prefix))
+			level.children = append(level.children, aws.ToString(cp.Prefix))
 		}
+		level.direct = append(level.direct, out.Contents...)
 
 		if out.IsTruncated == nil || !*out.IsTruncated {
 			break
@@ -112,7 +127,7 @@ func listCommonPrefixes(ctx context.Context, client ListObjectsV2API, bucket, ro
 		continuationToken = out.NextContinuationToken
 	}
 
-	return prefixes, nil
+	return level, nil
 }
 
 func summarizePrefix(ctx context.Context, client ListObjectsV2API, bucket, prefix string) (PrefixSummary, error) {
