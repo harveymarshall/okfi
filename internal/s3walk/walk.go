@@ -36,8 +36,36 @@ type PrefixSummary struct {
 // bucket, at every depth, and returns a shallow summary of each: object
 // count, total size, mtime range, and a capped sample of object keys. It
 // does not read object contents. Results are depth-first, no recursion cap.
+//
+// rootPrefix itself is also summarized (its own summary comes first), so
+// objects sitting directly under it are not lost — otherwise a prefix with
+// no further nested sub-prefixes (e.g. a single flat object) would discover
+// zero common prefixes and yield zero summaries despite having content. The
+// root summary is omitted when rootPrefix has no objects at all.
 func WalkPrefixes(ctx context.Context, client ListObjectsV2API, bucket, rootPrefix string) ([]PrefixSummary, error) {
-	prefixes, err := listCommonPrefixes(ctx, client, bucket, rootPrefix)
+	root, err := summarizePrefix(ctx, client, bucket, rootPrefix)
+	if err != nil {
+		return nil, err
+	}
+
+	var summaries []PrefixSummary
+	if root.ObjectCount > 0 {
+		summaries = append(summaries, root)
+	}
+
+	children, err := walkChildren(ctx, client, bucket, rootPrefix)
+	if err != nil {
+		return nil, err
+	}
+	summaries = append(summaries, children...)
+	return summaries, nil
+}
+
+// walkChildren recursively discovers and summarizes every prefix nested
+// under parentPrefix, at every depth. Unlike WalkPrefixes, it does not
+// summarize parentPrefix itself — only its descendants.
+func walkChildren(ctx context.Context, client ListObjectsV2API, bucket, parentPrefix string) ([]PrefixSummary, error) {
+	prefixes, err := listCommonPrefixes(ctx, client, bucket, parentPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +78,7 @@ func WalkPrefixes(ctx context.Context, client ListObjectsV2API, bucket, rootPref
 		}
 		summaries = append(summaries, summary)
 
-		children, err := WalkPrefixes(ctx, client, bucket, prefix)
+		children, err := walkChildren(ctx, client, bucket, prefix)
 		if err != nil {
 			return nil, err
 		}

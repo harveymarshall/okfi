@@ -285,3 +285,71 @@ func TestWalkPrefixes_MultipleTopLevelPrefixes(t *testing.T) {
 		t.Fatalf("expected 2 summaries, got %d", len(summaries))
 	}
 }
+
+func TestWalkPrefixes_FlatObjectsUnderRootWithNoSubPrefixes(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	client := &fakeS3Client{
+		commonPrefixes: nil, // no sub-prefixes at all
+		objectsByPrefix: map[string][][]types.Object{
+			"some/path/": {{obj("some/path/report.pdf", 100, t0)}},
+		},
+	}
+
+	summaries, err := s3walk.WalkPrefixes(context.Background(), client, "my-bucket", "some/path/")
+	if err != nil {
+		t.Fatalf("WalkPrefixes returned error: %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("expected 1 summary for the flat root prefix, got %d", len(summaries))
+	}
+
+	got := summaries[0]
+	if got.Prefix != "some/path/" {
+		t.Errorf("Prefix = %q, want %q", got.Prefix, "some/path/")
+	}
+	if got.ObjectCount != 1 {
+		t.Errorf("ObjectCount = %d, want 1", got.ObjectCount)
+	}
+}
+
+func TestWalkPrefixes_RootWithBothDirectObjectsAndSubPrefixes(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	client := &fakeS3Client{
+		commonPrefixesByParent: map[string][]string{
+			"some/path/": {"some/path/orders/"},
+		},
+		objectsByPrefix: map[string][][]types.Object{
+			// summarizePrefix lists with no delimiter, so the root's own
+			// listing naturally includes its direct object plus everything
+			// nested under its sub-prefixes too.
+			"some/path/":        {{obj("some/path/report.pdf", 100, t0), obj("some/path/orders/1.csv", 1, t0)}},
+			"some/path/orders/": {{obj("some/path/orders/1.csv", 1, t0)}},
+		},
+	}
+
+	summaries, err := s3walk.WalkPrefixes(context.Background(), client, "my-bucket", "some/path/")
+	if err != nil {
+		t.Fatalf("WalkPrefixes returned error: %v", err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("expected 2 summaries (root + sub-prefix), got %d", len(summaries))
+	}
+	if summaries[0].Prefix != "some/path/" {
+		t.Errorf("summaries[0].Prefix = %q, want root %q first", summaries[0].Prefix, "some/path/")
+	}
+	if summaries[1].Prefix != "some/path/orders/" {
+		t.Errorf("summaries[1].Prefix = %q, want %q", summaries[1].Prefix, "some/path/orders/")
+	}
+}
+
+func TestWalkPrefixes_EmptyRootYieldsNoSummary(t *testing.T) {
+	client := &fakeS3Client{}
+
+	summaries, err := s3walk.WalkPrefixes(context.Background(), client, "my-bucket", "empty/")
+	if err != nil {
+		t.Fatalf("WalkPrefixes returned error: %v", err)
+	}
+	if len(summaries) != 0 {
+		t.Fatalf("expected 0 summaries for an empty prefix, got %d", len(summaries))
+	}
+}
