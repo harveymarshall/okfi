@@ -17,7 +17,7 @@ inference. BigQuery, Redshift, and GCS are not yet implemented.
 ## Install
 
 ```sh
-go install github.com/harveymarshall/okfi@latest
+go install github.com/harveymarshall/okfi/cmd/okfi@latest
 ```
 
 ## Usage
