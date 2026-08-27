@@ -1,7 +1,7 @@
 // Package s3walk recursively discovers prefixes in an S3 bucket, at every
 // nesting level, and summarizes each one (object count, total size, mtime
-// range, sample keys) for shallow OKF bundle generation. It does not
-// inspect object contents.
+// range) plus the objects sitting directly at that level, for shallow OKF
+// bundle generation. It does not inspect object contents.
 package s3walk
 
 import (
@@ -13,82 +13,84 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
-// MaxSampleKeys caps how many object keys are recorded per prefix summary.
-const MaxSampleKeys = 5
-
 // ListObjectsV2API is the minimal S3 surface WalkPrefixes needs. The
 // concrete *s3.Client satisfies it, and tests supply a fake.
 type ListObjectsV2API interface {
 	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
 }
 
-// PrefixSummary is the shallow inventory of one top-level prefix.
+// ObjectInfo is the shallow record of one S3 object sitting directly at a
+// prefix level: enough for a caller to decide whether to promote it to a
+// concept and to describe it without reading its contents.
+type ObjectInfo struct {
+	Key          string
+	Size         int64
+	LastModified time.Time
+}
+
+// PrefixSummary is the shallow, direct-level inventory of one prefix: the
+// aggregate over the objects sitting directly under it (not a recursive
+// subtree rollup — each nested prefix gets its own summary), plus the list
+// of those direct objects the caller asked to keep (see WalkPrefixes'
+// keep predicate).
 type PrefixSummary struct {
 	Prefix      string
 	ObjectCount int
 	TotalSize   int64
 	MinModified time.Time
 	MaxModified time.Time
-	SampleKeys  []string
+	Objects     []ObjectInfo
 }
 
+// KeepFunc reports whether an object's detail should be retained in a
+// PrefixSummary's Objects list. It does not affect the aggregate (count,
+// size, mtime range), which always covers every direct object.
+type KeepFunc func(key string) bool
+
 // WalkPrefixes recursively discovers every prefix nested under rootPrefix in
-// bucket, at every depth, and returns a shallow summary of each: object
-// count, total size, mtime range, and a capped sample of object keys. It
-// does not read object contents. Results are depth-first, no recursion cap.
+// bucket, at every depth, and returns a shallow summary of each level: the
+// aggregate (object count, total size, mtime range) and the list of objects
+// sitting directly at that level. It does not read object contents.
 //
-// rootPrefix itself is also summarized (its own summary comes first) when
-// it has objects sitting directly under it — not nested under any further
-// sub-prefix. Without this, a prefix with no sub-prefixes at all (e.g. a
-// single flat object) would discover zero common prefixes and yield zero
-// summaries despite having content. The root summary counts only its own
-// direct objects, not the full recursive subtree — descendants already get
-// their own summaries, so aggregating them again here would double-count.
-func WalkPrefixes(ctx context.Context, client ListObjectsV2API, bucket, rootPrefix string) ([]PrefixSummary, error) {
-	level, err := listPrefixLevel(ctx, client, bucket, rootPrefix)
+// Each summary counts only its level's direct objects — never the recursive
+// subtree — because every descendant prefix already gets its own summary,
+// so rolling their objects up here would double-count on descent. A prefix
+// with no direct objects at all (only sub-prefixes) yields no summary of its
+// own; its sub-prefixes still do. Results are depth-first, no recursion cap.
+//
+// keep bounds how much per-object detail is held in memory: only objects
+// for which keep returns true are recorded in each PrefixSummary.Objects.
+// A nil keep retains every object. The aggregate always covers all direct
+// objects regardless.
+func WalkPrefixes(ctx context.Context, client ListObjectsV2API, bucket, rootPrefix string, keep KeepFunc) ([]PrefixSummary, error) {
+	return walkLevel(ctx, client, bucket, rootPrefix, keep)
+}
+
+// walkLevel summarizes prefix from its direct objects (if any) and recurses
+// into each of its immediate child prefixes, at every depth.
+func walkLevel(ctx context.Context, client ListObjectsV2API, bucket, prefix string, keep KeepFunc) ([]PrefixSummary, error) {
+	level, err := listPrefixLevel(ctx, client, bucket, prefix)
 	if err != nil {
 		return nil, err
 	}
 
 	var summaries []PrefixSummary
 	if len(level.direct) > 0 {
-		summary := PrefixSummary{Prefix: rootPrefix}
+		summary := PrefixSummary{Prefix: prefix}
 		for _, obj := range level.direct {
-			accumulate(&summary, obj)
+			accumulate(&summary, obj, keep)
 		}
 		summaries = append(summaries, summary)
 	}
 
-	children, err := walkChildren(ctx, client, bucket, level.children)
-	if err != nil {
-		return nil, err
+	for _, child := range level.children {
+		childSummaries, err := walkLevel(ctx, client, bucket, child, keep)
+		if err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, childSummaries...)
 	}
-	summaries = append(summaries, children...)
-	return summaries, nil
-}
 
-// walkChildren summarizes each prefix in children (each one's full
-// recursive subtree, via summarizePrefix) and recurses into its own
-// nested sub-prefixes, at every depth.
-func walkChildren(ctx context.Context, client ListObjectsV2API, bucket string, children []string) ([]PrefixSummary, error) {
-	var summaries []PrefixSummary
-	for _, prefix := range children {
-		summary, err := summarizePrefix(ctx, client, bucket, prefix)
-		if err != nil {
-			return nil, err
-		}
-		summaries = append(summaries, summary)
-
-		level, err := listPrefixLevel(ctx, client, bucket, prefix)
-		if err != nil {
-			return nil, err
-		}
-		grandchildren, err := walkChildren(ctx, client, bucket, level.children)
-		if err != nil {
-			return nil, err
-		}
-		summaries = append(summaries, grandchildren...)
-	}
 	return summaries, nil
 }
 
@@ -130,38 +132,12 @@ func listPrefixLevel(ctx context.Context, client ListObjectsV2API, bucket, prefi
 	return level, nil
 }
 
-func summarizePrefix(ctx context.Context, client ListObjectsV2API, bucket, prefix string) (PrefixSummary, error) {
-	summary := PrefixSummary{Prefix: prefix}
-
-	var continuationToken *string
-	for {
-		out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-			Bucket:            aws.String(bucket),
-			Prefix:            aws.String(prefix),
-			ContinuationToken: continuationToken,
-		})
-		if err != nil {
-			return PrefixSummary{}, err
-		}
-
-		for _, obj := range out.Contents {
-			accumulate(&summary, obj)
-		}
-
-		if out.IsTruncated == nil || !*out.IsTruncated {
-			break
-		}
-		continuationToken = out.NextContinuationToken
-	}
-
-	return summary, nil
-}
-
-func accumulate(summary *PrefixSummary, obj types.Object) {
+func accumulate(summary *PrefixSummary, obj types.Object, keep KeepFunc) {
 	summary.ObjectCount++
 	summary.TotalSize += aws.ToInt64(obj.Size)
 
-	if modified := aws.ToTime(obj.LastModified); !modified.IsZero() {
+	modified := aws.ToTime(obj.LastModified)
+	if !modified.IsZero() {
 		if summary.MinModified.IsZero() || modified.Before(summary.MinModified) {
 			summary.MinModified = modified
 		}
@@ -170,7 +146,12 @@ func accumulate(summary *PrefixSummary, obj types.Object) {
 		}
 	}
 
-	if len(summary.SampleKeys) < MaxSampleKeys {
-		summary.SampleKeys = append(summary.SampleKeys, aws.ToString(obj.Key))
+	key := aws.ToString(obj.Key)
+	if keep == nil || keep(key) {
+		summary.Objects = append(summary.Objects, ObjectInfo{
+			Key:          key,
+			Size:         aws.ToInt64(obj.Size),
+			LastModified: modified,
+		})
 	}
 }

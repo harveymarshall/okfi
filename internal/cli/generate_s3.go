@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -15,11 +16,18 @@ import (
 	"github.com/harveymarshall/okfi/internal/s3walk"
 )
 
+// defaultObjectTypes is the extension allowlist applied when --object-types
+// is not given: document-ish files worth grounding an agent on. Bulk /
+// partitioned data (csv, json, parquet, ...) is deliberately excluded — it
+// stays rolled into each prefix's index.md summary.
+var defaultObjectTypes = []string{"pdf", "md", "markdown", "txt", "rst", "docx", "doc", "xlsx", "pptx"}
+
 // newGenerateS3Cmd builds "okfi generate s3 <s3-uri> --out <dir>".
 func newGenerateS3Cmd() *cobra.Command {
 	var out string
 	var region string
 	var profile string
+	var objectTypes []string
 
 	cmd := &cobra.Command{
 		Use:   "s3 <s3-uri>",
@@ -42,17 +50,25 @@ func newGenerateS3Cmd() *cobra.Command {
 			}
 			client := s3.NewFromConfig(cfg)
 
-			summaries, err := s3walk.WalkPrefixes(ctx, client, bucket, rootPrefix)
+			allow := newExtensionFilter(objectTypes)
+
+			summaries, err := s3walk.WalkPrefixes(ctx, client, bucket, rootPrefix, allow)
 			if err != nil {
 				return fmt.Errorf("walk s3://%s/%s: %w", bucket, rootPrefix, err)
 			}
 
-			concepts := make([]bundle.Concept, 0, len(summaries))
+			now := time.Now()
+
+			var concepts []bundle.Concept
+			var dirSummaries []bundle.DirSummary
 			for _, s := range summaries {
-				concepts = append(concepts, toConcept(bucket, s, time.Now()))
+				dirSummaries = append(dirSummaries, toDirSummary(s))
+				for _, obj := range s.Objects {
+					concepts = append(concepts, toObjectConcept(bucket, obj, now))
+				}
 			}
 
-			if err := bundle.WriteBundle(concepts, out); err != nil {
+			if err := bundle.WriteBundle(concepts, dirSummaries, out); err != nil {
 				return fmt.Errorf("write bundle: %w", err)
 			}
 
@@ -64,6 +80,8 @@ func newGenerateS3Cmd() *cobra.Command {
 	cmd.Flags().StringVar(&out, "out", "", "output directory for the generated bundle (required)")
 	cmd.Flags().StringVar(&region, "region", "", "AWS region (optional, falls back to default credential chain)")
 	cmd.Flags().StringVar(&profile, "profile", "", "AWS shared-config profile (optional)")
+	cmd.Flags().StringSliceVar(&objectTypes, "object-types", defaultObjectTypes,
+		`file extensions to promote to concepts, comma-separated (e.g. "pdf,md"); "*" promotes every object`)
 	_ = cmd.MarkFlagRequired("out")
 
 	return cmd
@@ -110,43 +128,74 @@ func parseS3URI(uri string) (bucket, prefix string, err error) {
 	return bucket, prefix, nil
 }
 
-// toConcept maps a walker's shallow prefix summary onto an OKF concept. The
-// slug keeps the prefix's "/" separators (rather than flattening them) so
-// bundle.WriteBundle lays nested prefixes out at matching nested output
-// paths, mirroring the source hierarchy.
-func toConcept(bucket string, s s3walk.PrefixSummary, generatedAt time.Time) bundle.Concept {
-	slug := strings.Trim(s.Prefix, "/")
-	if slug == "" {
-		// s.Prefix == "" only for the walked root itself. Using "_root"
-		// rather than the more obvious "root" avoids colliding with a
-		// real top-level prefix literally named "root/", which would
-		// otherwise trim to the same slug.
-		slug = "_root"
+// newExtensionFilter returns a predicate reporting whether an object key
+// should be promoted to a concept, given the --object-types allowlist. A
+// list containing "*" promotes every object; otherwise the key's final
+// extension is matched case-insensitively, with or without a leading dot.
+// Directory-marker keys (trailing "/") are never promoted, and blank
+// allowlist entries are ignored so they can't match extensionless keys.
+func newExtensionFilter(objectTypes []string) func(key string) bool {
+	star := false
+	allow := make(map[string]bool, len(objectTypes))
+	for _, t := range objectTypes {
+		if t == "*" {
+			star = true
+			continue
+		}
+		if ext := normalizeExt(t); ext != "" {
+			allow[ext] = true
+		}
 	}
-
-	return bundle.Concept{
-		Slug:      slug,
-		Type:      "s3.prefix",
-		Title:     s.Prefix,
-		Resource:  fmt.Sprintf("s3://%s/%s", bucket, s.Prefix),
-		Timestamp: generatedAt,
-		Body:      renderBody(s),
+	return func(key string) bool {
+		if key == "" || strings.HasSuffix(key, "/") {
+			return false
+		}
+		if star {
+			return true
+		}
+		return allow[normalizeExt(path.Ext(path.Base(key)))]
 	}
 }
 
-func renderBody(s s3walk.PrefixSummary) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "- Object count: %d\n", s.ObjectCount)
-	fmt.Fprintf(&b, "- Total size: %d bytes\n", s.TotalSize)
-	if !s.MinModified.IsZero() || !s.MaxModified.IsZero() {
-		fmt.Fprintf(&b, "- Last modified range: %s to %s\n",
-			s.MinModified.UTC().Format(time.RFC3339), s.MaxModified.UTC().Format(time.RFC3339))
+func normalizeExt(s string) string {
+	return strings.ToLower(strings.TrimPrefix(s, "."))
+}
+
+// toObjectConcept maps a directly-listed S3 object onto an OKF concept. The
+// slug keeps the full object key (separators and extension), so
+// bundle.WriteBundle lays the concept out at an output path mirroring the
+// source key: "reports/2026/q1.pdf" -> "reports/2026/q1.pdf.md".
+func toObjectConcept(bucket string, o s3walk.ObjectInfo, generatedAt time.Time) bundle.Concept {
+	return bundle.Concept{
+		Slug:      o.Key,
+		Type:      "s3.object",
+		Title:     path.Base(o.Key),
+		Resource:  fmt.Sprintf("s3://%s/%s", bucket, o.Key),
+		Timestamp: generatedAt,
+		Body:      renderObjectBody(o),
 	}
-	if len(s.SampleKeys) > 0 {
-		b.WriteString("- Sample keys:\n")
-		for _, key := range s.SampleKeys {
-			fmt.Fprintf(&b, "  - %s\n", key)
-		}
+}
+
+func renderObjectBody(o s3walk.ObjectInfo) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "- Key: %s\n", o.Key)
+	fmt.Fprintf(&b, "- Size: %d bytes\n", o.Size)
+	if !o.LastModified.IsZero() {
+		fmt.Fprintf(&b, "- Last modified: %s\n", o.LastModified.UTC().Format(time.RFC3339))
 	}
 	return b.String()
+}
+
+// toDirSummary maps a walker's per-level prefix summary onto the
+// directory-level aggregate rendered into that level's index.md. The slug
+// drops the surrounding slashes so it lines up with the bundle's directory
+// tree ("" is the bundle root).
+func toDirSummary(s s3walk.PrefixSummary) bundle.DirSummary {
+	return bundle.DirSummary{
+		Slug:        strings.Trim(s.Prefix, "/"),
+		ObjectCount: s.ObjectCount,
+		TotalSize:   s.TotalSize,
+		MinModified: s.MinModified,
+		MaxModified: s.MaxModified,
+	}
 }

@@ -16,38 +16,30 @@ func TestWriteBundle_WritesOneFilePerConcept(t *testing.T) {
 
 	concepts := []bundle.Concept{
 		{
-			Slug:      "orders",
-			Type:      "s3.prefix",
-			Title:     "orders/",
-			Resource:  "s3://my-bucket/orders/",
+			Slug:      "orders/2026.csv",
+			Type:      "s3.object",
+			Title:     "2026.csv",
+			Resource:  "s3://my-bucket/orders/2026.csv",
 			Timestamp: ts,
-			Body:      "- Object count: 3\n- Total size: 300 bytes\n",
+			Body:      "- Size: 300 bytes\n",
 		},
 		{
-			Slug:      "events",
-			Type:      "s3.prefix",
-			Title:     "events/",
-			Resource:  "s3://my-bucket/events/",
+			Slug:      "notes.md",
+			Type:      "s3.object",
+			Title:     "notes.md",
+			Resource:  "s3://my-bucket/notes.md",
 			Timestamp: ts,
-			Body:      "- Object count: 1\n- Total size: 10 bytes\n",
+			Body:      "- Size: 10 bytes\n",
 		},
 	}
 
-	if err := bundle.WriteBundle(concepts, outDir); err != nil {
+	if err := bundle.WriteBundle(concepts, nil, outDir); err != nil {
 		t.Fatalf("WriteBundle returned error: %v", err)
 	}
 
-	entries, err := os.ReadDir(outDir)
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
-	if len(entries) != 3 {
-		t.Fatalf("expected 3 files (2 concepts + index.md), got %d", len(entries))
-	}
-
-	for _, name := range []string{"orders.md", "events.md", "index.md"} {
-		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
-			t.Errorf("expected file %s to exist: %v", name, err)
+	for _, rel := range []string{"orders/2026.csv.md", "notes.md.md", "index.md", "orders/index.md"} {
+		if _, err := os.Stat(filepath.Join(outDir, rel)); err != nil {
+			t.Errorf("expected file %s to exist: %v", rel, err)
 		}
 	}
 }
@@ -57,42 +49,37 @@ func TestWriteBundle_FrontmatterAndBody(t *testing.T) {
 	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	concepts := []bundle.Concept{{
-		Slug:      "orders",
-		Type:      "s3.prefix",
-		Title:     "orders/",
-		Resource:  "s3://my-bucket/orders/",
+		Slug:      "report.pdf",
+		Type:      "s3.object",
+		Title:     "report.pdf",
+		Resource:  "s3://my-bucket/report.pdf",
 		Timestamp: ts,
-		Body:      "- Object count: 3\n",
+		Body:      "- Size: 300 bytes\n",
 	}}
 
-	if err := bundle.WriteBundle(concepts, outDir); err != nil {
+	if err := bundle.WriteBundle(concepts, nil, outDir); err != nil {
 		t.Fatalf("WriteBundle returned error: %v", err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(outDir, "orders.md"))
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	content := string(got)
+	content := readFile(t, filepath.Join(outDir, "report.pdf.md"))
 
 	if !strings.HasPrefix(content, "---\n") {
 		t.Errorf("content does not start with frontmatter delimiter, got: %q", content)
 	}
 	for _, want := range []string{
-		`type: "s3.prefix"`,
-		`title: "orders/"`,
-		`resource: "s3://my-bucket/orders/"`,
+		`type: "s3.object"`,
+		`title: "report.pdf"`,
+		`resource: "s3://my-bucket/report.pdf"`,
 		`timestamp: "2026-01-01T12:00:00Z"`,
 		`description: ""`,
-		"- Object count: 3",
+		"- Size: 300 bytes",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("content missing %q, got:\n%s", want, content)
 		}
 	}
 
-	frontmatterEnd := strings.Index(content[4:], "---\n")
-	if frontmatterEnd == -1 {
+	if strings.Index(content[4:], "---\n") == -1 {
 		t.Fatalf("no closing frontmatter delimiter found")
 	}
 }
@@ -102,46 +89,104 @@ func TestWriteBundle_NestedSlugCreatesSubdirectories(t *testing.T) {
 	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	concepts := []bundle.Concept{{
-		Slug:      "a/b/baz",
-		Type:      "s3.prefix",
-		Title:     "a/b/baz/",
-		Resource:  "s3://my-bucket/a/b/baz/",
+		Slug:      "a/b/baz.pdf",
+		Type:      "s3.object",
+		Title:     "baz.pdf",
+		Resource:  "s3://my-bucket/a/b/baz.pdf",
 		Timestamp: ts,
-		Body:      "- Object count: 1\n",
+		Body:      "- Size: 1 bytes\n",
 	}}
 
-	if err := bundle.WriteBundle(concepts, outDir); err != nil {
+	if err := bundle.WriteBundle(concepts, nil, outDir); err != nil {
 		t.Fatalf("WriteBundle returned error: %v", err)
 	}
 
-	wantPath := filepath.Join(outDir, "a", "b", "baz.md")
+	wantPath := filepath.Join(outDir, "a", "b", "baz.pdf.md")
 	if _, err := os.Stat(wantPath); err != nil {
 		t.Errorf("expected nested file %s to exist: %v", wantPath, err)
 	}
 }
 
-func TestWriteBundle_WritesRootIndexLinkingConcepts(t *testing.T) {
+func TestWriteBundle_RootIndexLinksConceptsAndDirs(t *testing.T) {
 	outDir := t.TempDir()
 	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	concepts := []bundle.Concept{
-		{Slug: "orders", Type: "s3.prefix", Title: "orders/", Resource: "s3://b/orders/", Timestamp: ts, Body: "x\n"},
-		{Slug: "events", Type: "s3.prefix", Title: "events/", Resource: "s3://b/events/", Timestamp: ts, Body: "x\n"},
+		{Slug: "top.pdf", Type: "s3.object", Title: "top.pdf", Resource: "s3://b/top.pdf", Timestamp: ts, Body: "x\n"},
+		{Slug: "orders/o.pdf", Type: "s3.object", Title: "o.pdf", Resource: "s3://b/orders/o.pdf", Timestamp: ts, Body: "x\n"},
 	}
 
-	if err := bundle.WriteBundle(concepts, outDir); err != nil {
+	if err := bundle.WriteBundle(concepts, nil, outDir); err != nil {
 		t.Fatalf("WriteBundle returned error: %v", err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(outDir, "index.md"))
-	if err != nil {
-		t.Fatalf("expected root index.md to exist: %v", err)
+	content := readFile(t, filepath.Join(outDir, "index.md"))
+	if !strings.Contains(content, "top.pdf.md") {
+		t.Errorf("root index.md missing link to top.pdf.md, got:\n%s", content)
 	}
-	content := string(got)
-	for _, want := range []string{"orders.md", "events.md"} {
+	if !strings.Contains(content, "orders/index.md") {
+		t.Errorf("root index.md missing link to child directory orders/, got:\n%s", content)
+	}
+}
+
+func TestWriteBundle_SummarySectionRendersFirst(t *testing.T) {
+	outDir := t.TempDir()
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	mod := time.Date(2026, 8, 22, 14, 39, 12, 0, time.UTC)
+
+	concepts := []bundle.Concept{
+		{Slug: "report.pdf", Type: "s3.object", Title: "report.pdf", Resource: "s3://b/report.pdf", Timestamp: ts, Body: "x\n"},
+	}
+	summaries := []bundle.DirSummary{
+		{Slug: "", ObjectCount: 3, TotalSize: 198150, MinModified: mod, MaxModified: mod},
+	}
+
+	if err := bundle.WriteBundle(concepts, summaries, outDir); err != nil {
+		t.Fatalf("WriteBundle returned error: %v", err)
+	}
+
+	content := readFile(t, filepath.Join(outDir, "index.md"))
+	for _, want := range []string{
+		"## Summary",
+		"- Object count: 3",
+		"- Total size: 198150 bytes",
+		"- Last modified range: 2026-08-22T14:39:12Z to 2026-08-22T14:39:12Z",
+	} {
 		if !strings.Contains(content, want) {
-			t.Errorf("root index.md missing link to %q, got:\n%s", want, content)
+			t.Errorf("index.md missing %q, got:\n%s", want, content)
 		}
+	}
+
+	summaryAt := strings.Index(content, "## Summary")
+	conceptsAt := strings.Index(content, "## Concepts")
+	if summaryAt == -1 || conceptsAt == -1 || summaryAt > conceptsAt {
+		t.Errorf("expected ## Summary before ## Concepts, got:\n%s", content)
+	}
+}
+
+func TestWriteBundle_BulkDataPrefixGetsIndexWithNoConcepts(t *testing.T) {
+	outDir := t.TempDir()
+
+	// A prefix with a summary but zero promoted concepts (a parquet lake).
+	summaries := []bundle.DirSummary{
+		{Slug: "lake/events", ObjectCount: 10000, TotalSize: 4200000000},
+	}
+
+	if err := bundle.WriteBundle(nil, summaries, outDir); err != nil {
+		t.Fatalf("WriteBundle returned error: %v", err)
+	}
+
+	content := readFile(t, filepath.Join(outDir, "lake", "events", "index.md"))
+	if !strings.Contains(content, "- Object count: 10000") {
+		t.Errorf("bulk-data index.md missing its summary, got:\n%s", content)
+	}
+	if strings.Contains(content, "## Concepts") {
+		t.Errorf("bulk-data index.md should have no ## Concepts section, got:\n%s", content)
+	}
+	// The intermediate lake/ dir is implied and gets its own index linking events/.
+	lakeIndex := readFile(t, filepath.Join(outDir, "lake", "index.md"))
+	if !strings.Contains(lakeIndex, "events/index.md") {
+		t.Errorf("lake/index.md missing link to events/, got:\n%s", lakeIndex)
 	}
 }
 
@@ -150,44 +195,53 @@ func TestWriteBundle_MultiLevelNestingGetsIndexAtEveryDir(t *testing.T) {
 	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	concepts := []bundle.Concept{
-		{Slug: "orders", Type: "s3.prefix", Title: "orders/", Resource: "s3://b/orders/", Timestamp: ts, Body: "x\n"},
-		{Slug: "a/b", Type: "s3.prefix", Title: "a/b/", Resource: "s3://b/a/b/", Timestamp: ts, Body: "x\n"},
-		{Slug: "a/b/baz", Type: "s3.prefix", Title: "a/b/baz/", Resource: "s3://b/a/b/baz/", Timestamp: ts, Body: "x\n"},
+		{Slug: "orders/o.pdf", Type: "s3.object", Title: "o.pdf", Resource: "s3://b/orders/o.pdf", Timestamp: ts, Body: "x\n"},
+		{Slug: "a/b/baz.pdf", Type: "s3.object", Title: "baz.pdf", Resource: "s3://b/a/b/baz.pdf", Timestamp: ts, Body: "x\n"},
 	}
 
-	if err := bundle.WriteBundle(concepts, outDir); err != nil {
+	if err := bundle.WriteBundle(concepts, nil, outDir); err != nil {
 		t.Fatalf("WriteBundle returned error: %v", err)
 	}
 
-	// index.md at every level: root, a/, a/b/
-	for _, dir := range []string{".", "a", filepath.Join("a", "b")} {
+	for _, dir := range []string{".", "orders", "a", filepath.Join("a", "b")} {
 		if _, err := os.Stat(filepath.Join(outDir, dir, "index.md")); err != nil {
 			t.Errorf("expected index.md in %s: %v", dir, err)
 		}
 	}
 
-	rootIndex := readFile(t, filepath.Join(outDir, "index.md"))
-	if !strings.Contains(rootIndex, "orders.md") {
-		t.Errorf("root index.md missing link to orders.md, got:\n%s", rootIndex)
-	}
-	if !strings.Contains(rootIndex, "a/index.md") {
-		t.Errorf("root index.md missing link to child directory a/, got:\n%s", rootIndex)
-	}
-
 	aIndex := readFile(t, filepath.Join(outDir, "a", "index.md"))
-	if !strings.Contains(aIndex, "b.md") {
-		t.Errorf("a/index.md missing link to child concept b.md (the a/b prefix itself), got:\n%s", aIndex)
-	}
 	if !strings.Contains(aIndex, "b/index.md") {
-		t.Errorf("a/index.md missing link to child directory b/ (holding a/b's children), got:\n%s", aIndex)
+		t.Errorf("a/index.md missing link to child directory b/, got:\n%s", aIndex)
 	}
-	if strings.Contains(aIndex, "orders.md") {
-		t.Errorf("a/index.md should not link unrelated sibling orders.md, got:\n%s", aIndex)
+	if strings.Contains(aIndex, "o.pdf") {
+		t.Errorf("a/index.md should not link unrelated sibling o.pdf, got:\n%s", aIndex)
 	}
 
 	abIndex := readFile(t, filepath.Join(outDir, "a", "b", "index.md"))
-	if !strings.Contains(abIndex, "baz.md") {
-		t.Errorf("a/b/index.md missing link to child concept baz.md, got:\n%s", abIndex)
+	if !strings.Contains(abIndex, "baz.pdf.md") {
+		t.Errorf("a/b/index.md missing link to child concept baz.pdf.md, got:\n%s", abIndex)
+	}
+}
+
+func TestWriteBundle_LeadingSlashKeyDoesNotClobberRootIndex(t *testing.T) {
+	outDir := t.TempDir()
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	concepts := []bundle.Concept{
+		{Slug: "/report.pdf", Type: "s3.object", Title: "report.pdf", Resource: "s3://b//report.pdf", Timestamp: ts, Body: "x\n"},
+	}
+	summaries := []bundle.DirSummary{{Slug: "", ObjectCount: 1, TotalSize: 100}}
+
+	if err := bundle.WriteBundle(concepts, summaries, outDir); err != nil {
+		t.Fatalf("WriteBundle returned error: %v", err)
+	}
+
+	rootIndex := readFile(t, filepath.Join(outDir, "index.md"))
+	if !strings.Contains(rootIndex, "## Summary") || !strings.Contains(rootIndex, "- Object count: 1") {
+		t.Errorf("root index.md lost its summary to an empty-named subdir, got:\n%s", rootIndex)
+	}
+	if !strings.Contains(rootIndex, "report.pdf.md") {
+		t.Errorf("root index.md missing the concept filed at bundle root, got:\n%s", rootIndex)
 	}
 }
 
@@ -205,31 +259,30 @@ func TestWriteBundle_RegeneratingIndexDropsStaleLinks(t *testing.T) {
 	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	first := []bundle.Concept{
-		{Slug: "orders", Type: "s3.prefix", Title: "orders/", Resource: "s3://b/orders/", Timestamp: ts, Body: "x\n"},
-		{Slug: "events", Type: "s3.prefix", Title: "events/", Resource: "s3://b/events/", Timestamp: ts, Body: "x\n"},
+		{Slug: "orders.pdf", Type: "s3.object", Title: "orders.pdf", Resource: "s3://b/orders.pdf", Timestamp: ts, Body: "x\n"},
+		{Slug: "events.pdf", Type: "s3.object", Title: "events.pdf", Resource: "s3://b/events.pdf", Timestamp: ts, Body: "x\n"},
 	}
-	if err := bundle.WriteBundle(first, outDir); err != nil {
+	if err := bundle.WriteBundle(first, nil, outDir); err != nil {
 		t.Fatalf("first WriteBundle: %v", err)
 	}
 
-	// events dropped, users added.
 	second := []bundle.Concept{
-		{Slug: "orders", Type: "s3.prefix", Title: "orders/", Resource: "s3://b/orders/", Timestamp: ts, Body: "x\n"},
-		{Slug: "users", Type: "s3.prefix", Title: "users/", Resource: "s3://b/users/", Timestamp: ts, Body: "x\n"},
+		{Slug: "orders.pdf", Type: "s3.object", Title: "orders.pdf", Resource: "s3://b/orders.pdf", Timestamp: ts, Body: "x\n"},
+		{Slug: "users.pdf", Type: "s3.object", Title: "users.pdf", Resource: "s3://b/users.pdf", Timestamp: ts, Body: "x\n"},
 	}
-	if err := bundle.WriteBundle(second, outDir); err != nil {
+	if err := bundle.WriteBundle(second, nil, outDir); err != nil {
 		t.Fatalf("second WriteBundle: %v", err)
 	}
 
 	index := readFile(t, filepath.Join(outDir, "index.md"))
-	if strings.Contains(index, "events.md") {
-		t.Errorf("index.md still links dropped concept events.md, got:\n%s", index)
+	if strings.Contains(index, "events.pdf.md") {
+		t.Errorf("index.md still links dropped concept events.pdf.md, got:\n%s", index)
 	}
-	if !strings.Contains(index, "users.md") {
-		t.Errorf("index.md missing newly added concept users.md, got:\n%s", index)
+	if !strings.Contains(index, "users.pdf.md") {
+		t.Errorf("index.md missing newly added concept users.pdf.md, got:\n%s", index)
 	}
-	if !strings.Contains(index, "orders.md") {
-		t.Errorf("index.md missing unchanged concept orders.md, got:\n%s", index)
+	if !strings.Contains(index, "orders.pdf.md") {
+		t.Errorf("index.md missing unchanged concept orders.pdf.md, got:\n%s", index)
 	}
 }
 
@@ -237,24 +290,21 @@ func TestWriteBundle_OverwritesInPlace(t *testing.T) {
 	outDir := t.TempDir()
 	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
-	first := []bundle.Concept{{Slug: "orders", Type: "s3.prefix", Title: "orders/", Resource: "s3://b/orders/", Timestamp: ts, Body: "first\n"}}
-	if err := bundle.WriteBundle(first, outDir); err != nil {
+	first := []bundle.Concept{{Slug: "orders.pdf", Type: "s3.object", Title: "orders.pdf", Resource: "s3://b/orders.pdf", Timestamp: ts, Body: "first\n"}}
+	if err := bundle.WriteBundle(first, nil, outDir); err != nil {
 		t.Fatalf("first WriteBundle: %v", err)
 	}
 
-	second := []bundle.Concept{{Slug: "orders", Type: "s3.prefix", Title: "orders/", Resource: "s3://b/orders/", Timestamp: ts, Body: "second\n"}}
-	if err := bundle.WriteBundle(second, outDir); err != nil {
+	second := []bundle.Concept{{Slug: "orders.pdf", Type: "s3.object", Title: "orders.pdf", Resource: "s3://b/orders.pdf", Timestamp: ts, Body: "second\n"}}
+	if err := bundle.WriteBundle(second, nil, outDir); err != nil {
 		t.Fatalf("second WriteBundle: %v", err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(outDir, "orders.md"))
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if strings.Contains(string(got), "first") {
+	got := readFile(t, filepath.Join(outDir, "orders.pdf.md"))
+	if strings.Contains(got, "first") {
 		t.Errorf("expected overwrite, but stale content survived: %s", got)
 	}
-	if !strings.Contains(string(got), "second") {
+	if !strings.Contains(got, "second") {
 		t.Errorf("expected new content, got: %s", got)
 	}
 }
