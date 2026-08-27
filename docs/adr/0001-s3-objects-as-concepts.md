@@ -85,7 +85,10 @@ prefixes still get an `index.md` stating how much sits there).
   tree of `index.md` summaries — an accurate reflection that there are no
   documents, only partitioned data.
 - `s3walk` must surface per-object data (key, size, modified) at each
-  level, not just the capped sample and the aggregate.
+  level, not just the capped sample and the aggregate. It takes a `keep`
+  predicate so only promoted objects are held in memory — the aggregate
+  still covers every direct object. Directory-marker keys (trailing `/`)
+  and blank `--object-types` entries are never promoted.
 - `bundle` must build its directory tree from prefix summaries *and*
   object concepts (levels can have a summary but no concepts), and
   `renderIndex` gains the `## Summary` section.
